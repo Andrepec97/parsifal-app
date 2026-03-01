@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import * as XLSX from "xlsx";
 
 const COOPERATIVE = [
@@ -29,25 +29,65 @@ const STATO_COLORS = {
 
 const oggi = () => new Date().toISOString().split("T")[0];
 
-const STORAGE_KEY = "parsifal_richieste_v1";
+const DRIVE_WEBAPP_URL =
+  "https://script.google.com/macros/s/AKfycbzvg0Yk8xxHqwlIzq_1ReWfjhsBAWtec2eyQIKhUSovGN3fU9lTSEkptp7J1oKad7II/exec";
+const DRIVE_WEBAPP_PATH =
+  "/macros/s/AKfycbzvg0Yk8xxHqwlIzq_1ReWfjhsBAWtec2eyQIKhUSovGN3fU9lTSEkptp7J1oKad7II/exec";
+const DRIVE_ENDPOINT = import.meta.env.DEV
+  ? `/gas${DRIVE_WEBAPP_PATH}`
+  : DRIVE_WEBAPP_URL;
 
-async function storageGet(key) {
-  if (typeof window !== "undefined" && window.storage?.get) {
-    return window.storage.get(key);
-  }
-  if (typeof window !== "undefined") {
-    return { value: window.localStorage.getItem(key) };
-  }
-  return { value: null };
+function normalizeRichiesta(item) {
+  if (!item || typeof item !== "object") return null;
+  return {
+    id: String(item.id ?? ""),
+    cliente: String(item.cliente ?? ""),
+    telefono: String(item.telefono ?? ""),
+    email: String(item.email ?? ""),
+    servizio: String(item.servizio ?? ""),
+    cooperativa: String(item.cooperativa ?? ""),
+    stato: String(item.stato ?? "Nuova"),
+    data_ingaggio: String(item.data_ingaggio ?? oggi()),
+    data_aggiornamento: String(item.data_aggiornamento ?? ""),
+    note: String(item.note ?? ""),
+    note_avanzamento: String(item.note_avanzamento ?? ""),
+    data_creazione: String(item.data_creazione ?? ""),
+  };
 }
 
-async function storageSet(key, value) {
-  if (typeof window !== "undefined" && window.storage?.set) {
-    return window.storage.set(key, value);
-  }
-  if (typeof window !== "undefined") {
-    window.localStorage.setItem(key, value);
-  }
+async function loadRichiesteFromDrive() {
+  const response = await fetch(DRIVE_ENDPOINT, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) throw new Error(`Errore caricamento: HTTP ${response.status}`);
+
+  const payload = await response.json();
+  if (!Array.isArray(payload)) return [];
+  return payload
+    .map(normalizeRichiesta)
+    .filter((item) => item && item.id);
+}
+
+async function postRichiestaAction(action, body) {
+  const response = await fetch(DRIVE_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=UTF-8" },
+    body: JSON.stringify({ action, ...body }),
+  });
+  if (!response.ok) throw new Error(`Errore ${action}: HTTP ${response.status}`);
+}
+
+function createRichiestaOnDrive(data) {
+  return postRichiestaAction("create", { data });
+}
+
+function updateRichiestaOnDrive(data) {
+  return postRichiestaAction("update", { data });
+}
+
+function deleteRichiestaOnDrive(id) {
+  return postRichiestaAction("delete", { id });
 }
 
 function generateId() {
@@ -83,21 +123,17 @@ export default function App() {
   const [editMode, setEditMode] = useState(false);
   const [toast, setToast] = useState(null);
 
-  // Load from storage
+  // Load from Google Drive (Apps Script endpoint)
   useEffect(() => {
     async function load() {
       try {
-        const res = await storageGet(STORAGE_KEY);
-        if (res && res.value) setRichieste(JSON.parse(res.value));
-      } catch (e) {}
+        const data = await loadRichiesteFromDrive();
+        setRichieste(data);
+      } catch (e) {
+        console.error(e);
+      }
     }
     load();
-  }, []);
-
-  const save = useCallback(async (data) => {
-    try {
-      await storageSet(STORAGE_KEY, JSON.stringify(data));
-    } catch (e) {}
   }, []);
 
   const showToast = (msg, type = "ok") => {
@@ -105,26 +141,28 @@ export default function App() {
     setTimeout(() => setToast(null), 2800);
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (!form.cliente.trim()) return showToast("Inserisci il nome del cliente", "err");
-    if (editMode && selected) {
-      const updated = richieste.map((r) =>
-        r.id === selected.id ? { ...r, ...form, data_aggiornamento: oggi() } : r
-      );
-      setRichieste(updated);
-      save(updated);
-      showToast("Richiesta aggiornata");
-    } else {
-      const nuova = { ...form, id: generateId(), data_creazione: oggi(), data_aggiornamento: oggi() };
-      const updated = [nuova, ...richieste];
-      setRichieste(updated);
-      save(updated);
-      showToast("Richiesta registrata: " + nuova.id);
+    try {
+      if (editMode && selected) {
+        const updatedRichiesta = { ...selected, ...form, data_aggiornamento: oggi() };
+        await updateRichiestaOnDrive(updatedRichiesta);
+        const updated = richieste.map((r) => (r.id === selected.id ? updatedRichiesta : r));
+        setRichieste(updated);
+        showToast("Richiesta aggiornata su Drive");
+      } else {
+        const nuova = { ...form, id: generateId(), data_creazione: oggi(), data_aggiornamento: oggi() };
+        await createRichiestaOnDrive(nuova);
+        setRichieste([nuova, ...richieste]);
+        showToast("Richiesta registrata su Drive: " + nuova.id);
+      }
+      setView("lista");
+      setEditMode(false);
+      setSelected(null);
+      setForm({ cliente: "", telefono: "", email: "", servizio: SERVIZI[0], cooperativa: COOPERATIVE[0], note: "", stato: "Nuova", data_ingaggio: oggi(), data_aggiornamento: "", note_avanzamento: "" });
+    } catch (e) {
+      showToast("Errore nel salvataggio su Drive", "err");
     }
-    setView("lista");
-    setEditMode(false);
-    setSelected(null);
-    setForm({ cliente: "", telefono: "", email: "", servizio: SERVIZI[0], cooperativa: COOPERATIVE[0], note: "", stato: "Nuova", data_ingaggio: oggi(), data_aggiornamento: "", note_avanzamento: "" });
   };
 
   const openEdit = (r) => {
@@ -134,12 +172,16 @@ export default function App() {
     setView("nuova");
   };
 
-  const handleDelete = (id) => {
-    const updated = richieste.filter((r) => r.id !== id);
-    setRichieste(updated);
-    save(updated);
-    showToast("Richiesta eliminata");
-    setView("lista");
+  const handleDelete = async (id) => {
+    try {
+      await deleteRichiestaOnDrive(id);
+      const updated = richieste.filter((r) => r.id !== id);
+      setRichieste(updated);
+      showToast("Richiesta eliminata su Drive");
+      setView("lista");
+    } catch (e) {
+      showToast("Errore eliminazione su Drive", "err");
+    }
   };
 
   const aperte = (coop) =>
